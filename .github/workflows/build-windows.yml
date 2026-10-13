@@ -1,0 +1,508 @@
+# Embedded source changes are distributed under the upstream MIT license.
+# MIT License
+# 
+# Copyright (c) 2026 Carmine Paolino
+# 
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+# of this software and associated documentation files (the "Software"), to deal
+# in the Software without restriction, including without limitation the rights
+# to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+# copies of the Software, and to permit persons to whom the Software is
+# furnished to do so, subject to the following conditions:
+# 
+# The above copyright notice and this permission notice shall be included in all
+# copies or substantial portions of the Software.
+# 
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+# IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+# FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+# AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+# LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+# OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+# SOFTWARE.
+#
+# Put this ONE file at .github/workflows/build-windows.yml in your own repository.
+# No source ZIP, credentials, secrets, or local compiler is required.
+# Manual only: this fetches pinned upstream source and applies the embedded patch.
+name: Build my Spotifast installer
+
+on:
+  workflow_dispatch:
+    inputs:
+      architecture:
+        description: "Your Windows PC (usually Intel / AMD x64)"
+        type: choice
+        required: true
+        default: Intel-AMD-x64
+        options:
+          - Intel-AMD-x64
+          - ARM64
+
+permissions:
+  contents: read
+
+concurrency:
+  group: spotifast-installer-${{ github.ref }}-${{ inputs.architecture }}
+  cancel-in-progress: false
+
+jobs:
+  installer:
+    name: Windows installer with artwork and MilkDrop
+    runs-on: ${{ inputs.architecture == 'ARM64' && 'windows-11-arm' || 'windows-latest' }}
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: pwsh
+        working-directory: source
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_NET_GIT_FETCH_WITH_CLI: 'true'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+      CARGO_PROFILE_TEST_DEBUG: '0'
+      CMAKE_GENERATOR: Ninja
+      TARGET: ${{ inputs.architecture == 'ARM64' && 'aarch64-pc-windows-msvc' || 'x86_64-pc-windows-msvc' }}
+      INNO_ARCH: ${{ inputs.architecture == 'ARM64' && 'aarch64' || 'x86_64' }}
+      VCPKG_TRIPLET: ${{ inputs.architecture == 'ARM64' && 'arm64-windows-static' || 'x64-windows-static' }}
+      CUSTOM_BUILD_REPOSITORY: ${{ github.repository }}
+    steps:
+      - name: Keep patch line endings unchanged
+        working-directory: ${{ github.workspace }}
+        run: |
+          git config --global core.autocrlf false
+          if ($LASTEXITCODE -ne 0) { throw "Unable to configure Git" }
+
+      - name: Get the exact original Spotifast source
+        uses: actions/checkout@v7
+        with:
+          repository: crmne/spotifast
+          ref: 36964f19e2fb1154d5e87973d76928c7ddbeaf06
+          path: source
+          persist-credentials: false
+
+      - name: Apply the artwork extension (embedded, checksum-verified)
+        shell: python
+        run: |
+          import base64, gzip, hashlib, os, subprocess
+          from pathlib import Path
+          encoded = (
+              'H4sIAAAAAAAC/71923bbSJLgu74CVp1RgxYFkRQlUZTlGZcvNZ5xuby+dM+uVgcNAqCEMgmwcdGlbZ0zT/sBuw/7B/Mj+yf9JRuX'
+              'zEQmkKBoV3XrVJkkkEhkRsY9IyKjZD539vYuk9IJ9p8H+WXmLbLwszPTfmwlaRTfOvNhdBweHHrebDwM5oOBMxwMjsbjrb29PePZ'
+              'rd3dXfP5f/kXZ+9kctA/cnbxYzhy4EoUr2LoNw2TuHDOnPMtx9me3ZXxsgo/b/e3nIstZ2v3/HwVhJ+Dy/jiYms3DZYxtNwOs0WW'
+              '+3+pgrTc3tq9jvMiyVK8MfSG3gAuFVmVh9Q0jy+Toszvdq/KclVM9/dholfVzAuz5X5eFeXeIkgv98M8KOPCS7I9min0EF7F4eei'
+              'WmIfB9HxbHIynh+Oh8Pjg+PZ8eToeD6ejI5PDg9PRmMAyuhwPA9P5uPoZBgcBUF0NBucHE8G49lwMJzMoLstR5+IY0wkvMqSMN7e'
+              'coyJDLzDbYLbaHQyQcCNDgbj/vCoC3I3QbHcm8HwL+N0PfQuk7kJtYE3HHuj3x1scTwJ52EIQItOgmg2C2bBZDSfHY+OjoZhOJyF'
+              'YTA8iCdw42QyOzgax0ej2SiCRvOTo8Hw8AS6a01011z8Pl64ieO/LvDrRSecLxc+gCWG4Wa5CWia+0BAenJ0RJCeTEb9CQJan87k'
+              'MJhNBgcn44ODg3AwmsdHk5M4mJ8MBsHscDCYz6JBOBoND6JgPBwfTY7j2fzk5DA4Oozgn+FgDO99COP5V5ZHcb63SMqY59eaMC4g'
+              'tU6WMM+9m3i24t/L7DZcFvw9rZZ7ZR4kJf6O2kReZsuFIlL8IYg8GE7Co5PA88YnB0E8shI5NdeJnC4QkY/7x0DjYwbfMl4ug9WI'
+              '4Qzr6fzgzJYrJymceZY7f0pgeVZO8TlJi75zc5UVsTNLSniicII8dn78+Z0zTxaAYA5OUT4WZrB82NWn92+KqfNhlZXJ/O4PhfP8'
+              'xVunyJZxmSwBvEWcX8NHeRU7BWIBPeYEhfOnePau7wRp5NwATmdViX2VV9B7DC3unCL5a+xkcwdgNQ+SBXSRwcKFWRTTQ9jhahGE'
+              '8VW2gHXCUUV5cJN6W3u0HDDZLyaCjQ63+9DDPKgW5d48Dsoqp+WfB4si7jvalfPtX1fxJbTeXqX0AdDCD1rhC+d+a/cH56fXr3g4'
+              'SXqJL8/SxR3BJVuVQIY4tjtAn1kAk83Lmyz/3HdmWQVrG8Gs5nvlVR4Hkbe1+/cdbZ/RFAcN4H2dzhdBiSNG8P01WTmBvvywOLhk'
+              'sDhukYf7eGkfGnl50fOcZwsc8B12A81WgBARzTeP/3ITFyUs/CV2WFSrVZaXfUABXs0gigonzRxauTKjN8+qZAFzd3A0MeHlcNsk'
+              'jvcvn734+aW3jAC31XdBGuEwGB8HB553dDQYH540SKNuzZRR/ybecoiEAf8SYcxzQElcG2cWX0HnAI55sExgJQHxUoDUdQxrUHwu'
+              'M4DUagUU8LqklS2cZVUkIUwmz6rLK2B3i2QGywFEcOFaeLW6u5fll/WvXt8p71ZJGCzglVURF1s4l7/95/8ZHQ6cn3/EUbx/9jPA'
+              'sgQcKhxYoZt4sXAQiwCtgLbCLI2YiK4CgvIsz26A5Jw4vUzSGEC8tfcRAJ6kZZzPgVrgW7ioYE60iIu4jIFygzQprvrOxyr/TF+w'
+              'v0+fgWmlSZA6wL3SAtEmSwvAV+yuWoFQioPl79nv2/hGUgr0kZZ5tqAZExLh1WKF7wEoOS/TywV0iLSwmIGUcRbBLF4UOFvn8eN3'
+              'sD50NY1jQD3BmJx3ebxMqqX3+LHzKo+BiYQhkCNANYSxMNhogEUcgCoAxIocCe6lGS+5ueKi26AoPcIr0EhQZA2HE6EbIJgUKC6r'
+              'BJB/kSAnDEoY43mhHs9BMStqpGnc2O89fgzz+up8wjUHPEAk5ZE7eVJ8hjvnf0oAJ5Z36vplXDozGHgc/XN3vzdXAfCpYk9d3//h'
+              'BvrZW96JS3d7or896G+P++s5X3Es72MkcUDAWXXpAAtY5dkKpUYg2RK1CSLn/DkuZAKgBJ5z4T7/5e3H969//PTx9dufgCAR+6/i'
+              'lJYUucJ5UhRVjExlWVipKMyXaVzPZJ/aF/tpfLMPyhuMANjUV9S3fvjBeZMBVeEilsBRSbbR6jJbVojmNrBLsOAeaDC7r1NYqA9x'
+              'iWMvnL/9r//t/Li+t8eP+8j94Xmi5/AKdLNYDAGUuqtgFYOATZYCeHAhBx4qhljGtwQ5ACcRxgpuwloWZRJ+jnOmHWCl8NwCZybl'
+              'BjRHSSTYF/HWDPpbyqGB/PGc55Kc5JiJPACZ7gSTO93axUfl6qEsTYpghix+dielkOe8zQBcLO6q1SILQJZ59Hog9CURMt4KYK4x'
+              'DB9YuxSGBYj48IoEvRKCSnjioIgRQ6cRKbII/Q9AoudymQq5Cth2kSxBm7pwoyws9v08nscAqRDwQjTag0Z7rLAsox8YvHu0ZnRH'
+              'CGbRdQ9f5gC+6JiKfETgr4mxbRQGyAO+4kTjlCfjMBYjWVSLhSnVNhoyyKyN2glpODs5imbHJ543mMWHc5CmhjTcrCeWlJu1RW43'
+              'Pj5BbkcfY7KEAlyl8m6BMACpRYwqyCPFyVF/mIEqDGB3oFPSQYAhB0xJDk6FdXJguuK9pw4gY4r6H+hLpGrMk9sYuwQ9vJCMGBRH'
+              'z3kXAJstkbmuVkB5QsvA3rcA6dIouzk11FzxakfiqQfsGtXaBDgs8R9g0koGifehgucxc/nhIU6ACPzRylkcIHOYJyvEKx62U9wV'
+              'YHwweZjAqBnK1q4kBnqT57y8BctQqHJLZCxwHYDRB5K+Ti6JGvsNgpdUhJS/tVulzKGAhn+B130zs5viLIfAXYj1wuO/5AkoHcEC'
+              '+eDjx++Zzokp5tg5WE55DNJX8mTih0B+I8/5RM+/Zs5IjO1v//lf0BQXvYNR9kn8cE+SR2Jr4LSOw33sI2vCLjrYIq0QEi6vhtD3'
+              'ENGdFfXoZNzbnwiFAMTLIPzlA73nTZJWt6QOhtkqEQYOPUrseXF3iogbZTFqZaVgl3AJ5nsAa5cic6VnGqv6DBToMIyLYl4tpKiI'
+              'qXWBHQYVTALGSa+AvsbwRPRrBVgr5QcqZulledWXYCFDqm8TfrIp9HOIOKAkF78QVuQZ8fVYPojwvLnCSbIuRJow6CcIBgQlkOns'
+              'jiCmRMbHKykBQUuIrxNQ8hRQBIUpBPWYbGJdahNFE3yZpgUuJCFid5jkYbUIYOXBHFnwHItsDtqKkLlX8WIFdAeSi9f2lw+CHYhX'
+              'wJKyaEL6KRYJqlhASLBUSFjFKgGlB6+AREZ3Wk5IIK1PyTwAYDhSUI8kj1mCglsDO6bJgsLPjWiNoftFDEJXLBoNXCwXPiBmGYR5'
+              'ViBqkUkuR4y9KQFLiE4G+dZuHICMhekl10lUgfIThLiisDohPcdKMpiOWVgBB0RCh0lfAYaFVQlfrwC/ZtltzFPc2g0XMCDRieKY'
+              'bNmGwDE/8HjZR1AsAXFgQfOUiCvCMa0CtA4itlZYwcgEh6D1Y66CIOgz6wPzBUz4y0tCPnQTkKFFJkYYr4jX0ZhYQUCeoWtK797+'
+              'RMQu4AiLDlf6zr+9e/kTrxk6HGiwoNdCd3F0KvSWGCZLN0HpYeMO9AspDFAxYSUHVRvxZG3tCzeE4inv6HvNrOGhMMYZ7MFarlbw'
+              'KCDyHBV2YkqIu0xRcthIJuQzATN8FYeAOMjKhd11nRSwsEDPOVkt8Ax0NCOjKCKIiV7Dz5c5sl805VlBARKIAcaiBUxnazcVwzc4'
+              'kINGfoEcjoUDM7agipLMYZuPgA/sPRZeSlbHpsCtk3QFiEQgpos82Ynzc/IjLcBoMJ44/+//8ucKZDmqBSxmCoBYTQPcB5BpWgCj'
+              'kzArndHhET1/eHSq8TK8VTjHR9T3cDSh1aIutna1cYCiQovJaDca07BAVcnjEhBVKqTwKUf2CjUeGsk1wBw106iPrlBuRfo4MGNh'
+              'vJMUIM8OAezTa4cdPAK1CV+yNJa8ZZ9Z+9bur9kMLcLAQW8ZMGFSE/6KPeUAT3qxpHEcSR7/CjgBtwEreDERDWCgabkAzlvmINRx'
+              'oMBkwK5KNVmSx0S3SySVz3G8EhoI8uSsKiQS0OKS2CSFPIqJHPDN4QI4m4DkMXC4BVjg5H5Qmhgono685MKcllkBEwT+nWe3RGYA'
+              'guGh8+rdh1OHPHxow/Fa4VxYj2ZLG78Vi+xmcddjkpoR/10FFXLOPkwmqkIYzDKTag5MlvhaHAkOL7QBB93Nl2DTglIEYK9JY2t3'
+              'VkVoKc/zOP4rYYWwYWAVcLUQPGGVE29haKCLJXB+evdJCttTJhK0GHYFbuUxunFQ0AODREEtVy/KmHGDrImqRayZTLAyyClRRVbs'
+              'qBbRSOHkQnv+7tM+vpuuI/YtY4DTHTkZSFoQohlc9tNrEsCFJISCjS/EmpL6OcX2d0pGBbjKyRKpAlhM5oDsJGUYjAHiLlfssUTj'
+              'TNpjuFDBNUrklN8ttAjnz0goOXt3/uxkM8Rb7PjPUgv1fi2y9M/Q3S/kv1XKKSKn4knSDAUhJoih7rZ+BP1AxPUAO5FCSfcopF8Z'
+              'OwnBFkH5UaV5jD7HCDFf2Dno1SNqRIcm0XyFEEPtBNZ+DwaXXItbKa0xu9/+LMb4Z+CwBbp3GjMjD+gyuyaLKMdhgbIvXa9qiUhl'
+              'VBrRDFjGZ6FcLJjQCX08YFYFoj5ooCn8BgzhkeozFx3DPANCC83mByl/Q8SQ58RX2KkGxEr4vrX7NiO7JCekef+GvBToXSjCPFmh'
+              'bkB+XqA2lEowTcHkyQOAHgLqTngPlHyAuaO6Hy7igMwnOSkiMRIgQH1yoXGUhmEAT4IgLIETgGxQ4DJmJZCjaEuxvlp7SaAO2EY5'
+              'm3KkiixBJV6JtjA59MgC1JBcyJEllB5BtLR0sVDHJZZA2wyGSBQDq4u+OLL0QC1dZMKjBcyPRpoTMABxiEGJpcvBHMFGNSLNaStD'
+              'yPoUVGWF4ay7SX6Euoe+8NIfeoNsFN4iPatxJLwbPzivssWCceCXJfo379hsRE/HhwTpe+BNvEFfGkFk3jhiB6+Qzl0arnwe9bJL'
+              'pkTP9HLg3gHM3INVn2k/hL8insTB5HjoeQeHRweHJ2PTX6E1Z6eEdgE9DwcH5GfFj2N0PKyqGeolFTCXZwDsL1sO/u3v70vDAZY3'
+              'RcaG1HxbMutLcYeJtotQt6+dDB4/DX26tKXag4W7joOFT7DyhUY0BS6aLfqqLawK4OmSG8Fd+pxOnwdlsMgu+2QPUTuNI04desF0'
+              'ql+bvoelAzWgj6siHwKL72rqPIN/UZ5UhfZeQKZ8Kuy2J6AO50/7BKPJmGA0GU8YRoC3Cx06+AcIrdwPZwrPvDBA+eSLO27Pq9Kb'
+              'PFj5We4D/sWucLTAuIP8c+/U7G8J9IYYf+Z8iBdz/W34txZKCAji2m5PAEz+bQo0owfjxREo8o1Lcr6Ny4wyMH3QWO76wq8/mLBj'
+              'fzjohmZY3nrQJ0/OBTY39xhlainj9nRwURP5OnKenTlvgUU2m9yQQemBFL7E7lntKFzoatdop0HE1rjVKShI/lUSRXEqtxSbjeBu'
+              '7CckArua3ASgtfgkW1QLhtmh2Aw56oAZ0ucyjpKgZugk9kF9TVlMg97jfMCegTn/twr9Jgrt56lQ8fxLgJi7g2iH4+npK/KPgx4w'
+              'n98VeIPRZEjQgy+H/WEnzuHfM5JT0yn67z4SYb3i3fCzp82m6sUoNOI0AnxNI/d5tgSNImr3oE8b/+5NqpQvZt/fCwU/twwQfD0e'
+              'wK51ABq02y3wz+PNHBeoqi8eARL2AFXmyaX3a5ak7raQmdu4h8SvPDU76xgwaK71aAtXMoKuASdz51ELRWZVcef2bM3VHBVD1Z7T'
+              '+OzpmkdBvH72ZUMfZl7eub2OB5Dv5PFfKlCUfGFGWNveN2HjdMCGXvqc3cLrkMgcX5sKvpUxMtsYHh8KXnsy6A/HXZhP3bCV7oOJ'
+              '4q8AI5DO8GXNy236hRcDXV/5ZLD5aXbjWhnznRgzdKpDFBDCXGDmMb5wKzZwYq28QibR7P7eQTEr32J21k04XnGXhkwuihtaURDu'
+              'N+mpV3fVGPxG2HhvqgDonwajAZRNnwJZBADqy9MpO5cj1xzkEtjpAlQs9O/5dfP20qhb3iwGxZ5nbbxWf0Yul/YY6vbXMdEvYd1k'
+              'OKSASPhycNQf0eb9MkPHZAF2jo52JfDJOawga/MIDB+0cBe1U51BsT9S6U6A3+qbGNk9biPhlx/O8S0X/APkmuBqUtP00W3kg93u'
+              'ZzdpvQrAsP0wSP1Z7KOvsDR5kamJYf8+fFUcc0/t6mHn2/pa4kSUdLiqSnTAGYuNXQO8odv4skqA+7NSralejcZicxQZXw4SEe3i'
+              '6bTMfDDlK5Dc+ELFgTUgGX2YHNRGUcob0UBggWlTYk4NtZKMTLtCyR7JD9RgyrtWjYc97wVPWJu5RhINkBI3cTsEkC5XwG5MkR0C'
+              'lTbYglzT+HbFXoEz6dYVz2htZZvzba3v7YuuRdAaWZcA7f289OO/PHK/ZRH7ahztzh65+jPMVHrfArQ29C0w++6BM2RlV/doQeu0'
+              '6khaBSoFLSX1MQS3AjPZFxanH5RAuGFMdFpU+TWG/fgB0iqGcbmGnoqxLwIJk+EExkdxKyBKWxa1jinKsjYvbqHPgDxKSwy2E4Y1'
+              'm90D/vO80WF4fBCyvQ3PX++nGKZQG9uNLpFHDvoD4I/942Nkjlu7+/uP1G4hb3cq74vagxB+hHr7nzZb2fCWOwv1hhP3Kbwufd5u'
+              '6ENr7lRoOOyG0rfxPeeFHkQSZqs7/A6UC9os90nGP21y7S3IjYc9xvkp706Rby4VsXcyMgXez6GOe9LXzy5ccmzhepEgSLLp9Mvz'
+              'Ki+yvE/BIkj26u4qAKt9+uVdgBux+O+P1dxogBIbGjzLw76zXBWhcZP1gy8vqlxs479OMaCixEbcjPnvl+fozzoY9R368hqH2XcE'
+              'V8ZRhfDvR7Zk/hUgtIjVT16/Qr6WZojjkV5pAiw6x6hT89crCpAQP3Dqca6Gj5SGQ8c9rIS2qvrOB/mVx49bf6Xz87P/8F+9fvNy'
+              'CrDHSN8zZ+I8BpQdjcXHqd7y5YufsOUBxori9pFx89X7Zz+//FB3dGQ+++71f7x888H/8b9/1Bup9zRfR735r99+fPn+j8/eTB25'
+              'CvCM/ApqQJ4tfd4EcY+OezSvH87ZVew+R56M67C66wOGzqpL/CBOhciQlwCNl3/pO/j/hxpMGsx6F9gdAdPNyeuMmgbGyRZp8BnU'
+              'pKCIt7ER2sNxWi0dTWhJMYjjoZcK/UKGZwhhJuIzxC8l5+5tUxGT0Mb+8LjFy+UohZOuKat5AkJOs19NXRe7s63rQnZrUxY30a3w'
+              'Gt2SwGRWuGmcluS+JN/CFUYxxRFtB9Y7B0malLz/Lqjfq9/D/mg/WwVhUt4B6ky0QcyCvOOO2MT0EdG0Wzi4n9l7r+0lIPfpC76I'
+              'TIO2XtEF3xqH8vR9KHHv/mn7jWtasKvbh0FbGtGSk6ElsJR2tpsrBSJPiVtn76n08Sl52/xtaGActW7eVMtru9le4+m0gcDyr7lM'
+              'o8NmA32pRoPmm4zlOji09j4l75z9Ses9HeCN2/dKsagBbyMLADjiiUsmm3RzTJ2PwsMCS7BjLqUOfYBseCWeaa4K9yAVXTTz2Srk'
+              'qfbtjUW4R91aRl3Zm3McxI+B9kANEiswjImjz4AnL+3ZJgD6BJwmNve+HwYaCNAjB50/DAkdEOsfMuDRAEf7yQaKEF+7TNGUCmBW'
+              'C9yUxRABqYNRTCFFF+phAYusMLc8lbHNHHmeUrCHsiuf/CFCbj6VQlzj6znee/rU5WFF2g2QjzBuwsb3cQHM4YlEZexq+hI3HBVi'
+              'ohlDynfDGPkjXkNtXvXr6u/o/bPQxX/5bKjyJIRZmad/9d2K2jLoEGmGdDaEsiFXPxrYI7HFkUxE4YIzFFe0hXZGBnM1u6KNI1I4'
+              'nr0BLeMc2eepc4B2Gn2XqNl3+NcHGeTIP9VrLk4l6cB6kgwrXPaGw5K4FSqH8I+FLgoLv270jbjqHh9N+hhW09yY8enu6PCojwE5'
+              'vW7sFZL/FcVQiBeyvumA+vukVl2lwKKok1rx6pv9vBBKuRRLFHcxdf4Yh0/oFUqiATwobxAMzCWTR+HeJBFupxFYruLk8qqcMnhq'
+              '/EUTsMFQk7lDDzpnsPLO16/iUfWTbz5VmqrWRLuowTqPadcRqMPd/kR5J2LDPc2cBaKJIGFbxNS2B4ZLRl7TXQ3aQBs1ssPUOeCD'
+              'RbXQ7t9wDIhGjMhcRWTImdmq7dPhdt4yuPWppS9A4nzIlrErZ9nZWoLsweag6GahbHfU0NLN9vVsCQtcgVViIi/uQMVKQmEVNaVH'
+              'A8kITgaKInwYXySq9NCfRo97gtDkcIA/l1fVcpYGCdjCiyLDDCm04wsRGSksSExC4uA+YNNJXoeBkFECjwV1f0l6p2JCRZYHq4kE'
+              'oICi3Z052O579LAMJa3SNMaYryBPKEJYbfYS9uAyz0VMCc0NEOTJmUDgnR1xh6fLt8S6acjLbRAJ/fxyFkyk70v4rlstFWQa0LR1'
+              'IeBpLITJL6bTNL5xa6YhxAB241fpEjA2oV1V1+RW54J65KSDgi3BviQrNWd556Kp0XG7oPDz4MbYpu7pPwRe0YdHQXOuaVH2m2Zk'
+              'EYeFOxyoXu5rtGYHhIvZyMDids6ryYVVERSsS7BGG/+iLjywOmCGT5XxvRFPIgyWHImiObt4EOKZyJ44a67d9LICrPT5Ns+oB/S+'
+              '8mN44Vf/q7Mt8ggCPW6Xk4QF+jM6bSt1IJmrt53pnonp9KfEEG3wS2iBj84sGllDCOqAkJGkMq2VQn9bQb8ELsyqUPF+ZEGJiG09'
+              'urvNvhvbc5Ir88rnNVvGnyGw5ctkTvMTLhlBDuSH4u8M2l7DY21AmnxxCNEwqxYRR57FMv5VA3A3GxTD8zTRqk/ILndVB3r/oqfm'
+              'hhbo/0KCSUG22YwSzBQQQtQyEwStiNQ8Q5WBQWZztauwYJDx2m1c1xQDiZJUAYH4GPfa3hZGJKVbgvgAVWuflW0PuUWHnHYhAuQp'
+              'NJYoUcUzW1HKsuuLM6Ohn9FHJ0qkZZ2VxTGXHARvQlPhBmjJXNABZWqaLUGewY+efAsxQrfnUTOfWvjLorVLzTs9GPx7ZuOP/vxo'
+              '7LZhBVe5UT2KnrOvXdZGhMqFO+zh/SE6wpt+ANuIBLhYu7BEB7QVjemUvaIk1QgAhB2zaj6Pc7fXVKLxj1mT5QbB44FRKjTdFfBm'
+              'JimEFaPcY2d82kJK9eDTlpP0Aay0hyLUGMRp10iFywrsDA5TZiY5j2+ApwkC5NwuIVwEbxeYbAHGA8gtSGFVFVcE9g72WlNjUvjx'
+              'clVaAjl0AlSTEun1ayjuviVKQSVXxoqc9H1DZGKACdljcfHINdgMutjrC4Z4ewdm/Vfz0r+t4tY1FJ7cQ69L0G8qc7vlPfPKgGWV'
+              'tiMwnSLLkvK+LaD6Yo6yS+7DazL90/pNtUjktvWMmMbEfX0r1sLjWDw/IPi+WehtKPCwX1nvw8o8iOHJiYjP32E+OiZqSCZM5+s4'
+              'fHSuWVBSxew39kJ6UiW+1+xMXAuXtrucHdzo0vVRtMmrydOWPgrmzXtKZAGleiUScoq75SJJPxeNhGpMOpeh5/MY/RaAmLj7hU5y'
+              'jkDPNStnCVwtCsoAHUwyXEP07Mt7NNo1QBW7YZTlngbXYLigE1smCVAW5iWwTlMRfSR7R8ZCnsseegHU1ZbmjWYGiPCH6DKHuYIy'
+              'I7VKyhT7Nn0cH9GggVlN0ylCl+HQNXsDo7B5i0CQ8omWbaoUvtYrg8+x66op7zrDnpi3Dn5yQgL9Yjzijup0gwUyhkjVdIwl+YeY'
+              'PEBZcriSIopgHjMKyG0eII2izIkycCtLI4OXt0FYimQjYcuIAlmcWMEpB332KeBXyo0UeaEiLXn/U5rcejXY8Y21sjk+qucLBr5q'
+              'gEnoPrJod5t1hu2evSEYvDRDt3fueePBhZeUyGQ9DH2qJtMp4HtQhEniX8W3UXKZlBooePg6e+hjODZQPqgE6kq3Qesy4+hLp1/b'
+              'NUebzlfBEPeck8u4AFh9gJ/3Gp5KHFWcysBiuccv2bu7Q+1VWKneVsIEVUJarEfu9pfp7b0AIL96Oo1oIKIjhTCY7cYxh7RxMb3J'
+              'AZDujgIHB7buyHdgIIppJNfLo+igrpejUQLlY2FafhxyLhHHpcltbE4y+UOBO6RLzCrCQI9twdl1iaHQty+BpPyLMuMCc4HkSog2'
+              'U7lWokfhl1IbNUY4gvT4UoiK2JsXl1CJUw+J+Adzs9J4OyAbsp/mIDbeqYyMQSvVXA7essMnxtw0I3jcnVt+arSia32DKyyhvx0V'
+              'vmFsf/N+nwG8ZtBfSqHkAlTAjbO2YSvznaGd+IqkrgKcUWkwjNWnztBiGocyPljGrevqtXpF2w6m97CRUvhYIQ4jpNyveOUrjf4p'
+              '2zC9ztBxDmU6c1ztF0mVf+qexGlHX8K246yLVpN6jhzZvKFh/bgdtksSDG9bLmOmQZb7YG7HwCYRBLu2iZzX071gg7o5KxFCJpJq'
+              'RCi4H8yRVVOELIG9wAQ9qv/mR4Id+AVmf+Gre5Y4ZFtEsB1uDReWVHJ3HpoNNTQxSIIeMBO7on0AQS2ohdcRztLl/cVKtOhDYn1W'
+              'Bkk2g5+m0zev37589r7DitPfYa4Uy01Q75rh3uWthyqpzB5xt0X1IZmtIPIqHxyQNp6e6RRW25gv6vAaGVqzyBQ7DMoSrVvkhNaY'
+              'EMriVPeIk8pblCPaFSVS3q1i5J8iCpWf4Ii3JAXDNEmf/JjdPonuUqFxVsQ/p6/o88kvVbmqEHtE7/k8Yo1UiIOngP8fQDN5+vRU'
+              '3zlMsI5czVIaWzlyR5H9s0a0kIxB7YBCTlrGVGobok1L6agNmP6aVdCCnESIvxxvAQtT4BYvfOIWr4zLgYlCp2psGAY4nb6Pwxh6'
+              'zp/IWT/V43jWLg5Jxca7xUY/pazsqH1hXQutMyp4PJI5uz17aAYNAe36NYEpYnyo9T5tvYfAcS4c8mq3xaN+UduMsBZA6+0UPgUg'
+              'EfW7RF2iq6DeS7tJjWxiUbAEwJFVmNToGbOQyRe1wDWkDlIy2m0+MBv3K3776rB1xwwAqcvFelexn0RIyMgOp9Mn75DvfsDrT3VL'
+              'wQzqaWSYGQlshqMZIYWOZi2pA2FnEa2KURJh12wSmnuBricZAVh4Q3HRTlHIzbrF5X23noOLhnpqlGCSJxVDwZAHJJJ6J4WWiatl'
+              '0KyfrVb/npSiNmBwEyRUEUGl9aZ1pQ6tjirXbMAkc2YE+1RvCatrYKGUGGtlaXU2jPUQ2WbdiphmsYhQ3jbSf2mnCNnTxNjm7Jac'
+              'KpaHNvyQgi5401YQzNkGO1g757IU7K8r8cEFYo2SsA9J+/W9XNgTHnAKsnbBVJMUDogFEhIN9zFJgGcYDY1i4EXCycDkSbDoS5RK'
+              'lpRgWksPiRF+vm17JogitLhQE9omL1ux3degbHsEq38JJ46+zdtMG+VwflKvKL2/rRAgNFjIoNLavq/aCKYN2mb2GSPLc5kk9iNW'
+              'yhXbfL5I//cZ520QouFz1CXlJnU1oQK8nXdb/ha9JpppayIIWnuG+tSIK+HzyJTEtLwZVqP3s9SVqNKzYmDbn47sx5rgeGrbnSHn'
+              'A3mi0OxHNl2b28rAx9m6OMoGNO57LduhqYhstItTKyaWNCRTSbFYmbWa0u/mui1Jg14oQs5upgasccrZla/SXygNkyJg5AxZD4OP'
+              'P/C2divFzMX8YazEQ+oKLi7rL0jKlL+Wxgt32DRAb4LPscjUbGcuibg0yoAgDDfRv4muHvom3G1VDlZp2dJT19xTXgU3qdtBqS1q'
+              'BfhYbUds5FP8osyh5kdsbXG2D+bn3rdEBOC5vzaDWmhqMkhKrkGXpctVX7pN3Q2SiBsWL3pMeYjGC2g0hmOKs206eIZcp/56BeI5'
+              '+mIjuS+AVTtoX+A9MYWCqIqTeG5IYZBeR5VmpIW96hHGmDKreTwVoRhKoEYxOvPnDqf8lAp41Z4kj5vfcnXK3TiLCr6Rc0UxVLHk'
+              'tM2+Y+BEA2eYpmRzr8zvYI3Da3v6OiBehAy2A/cs+NeBUkoTQAX2rKm/nuNLvKYB0NENzJqaq+I7QLtqRUlGa72Rx3uHLqhUyY6J'
+              '1MCh5oLu1zQWACLwk1DR3KLrIGZAj/RxaZtLiiEJJZM/TzfthbR60QMZ8Mwk1Zg27egB7vDgemwwbZ1oPBXar61bX1MTNhm40aFI'
+              'MrG76rr+1vr3bH/365vcP4g4bxVlPdAWmSstyqZY9f1L0uTd/NpNoLFWX1uLZ9/4ou8Ge8et+werY8g1YH3mY373HhgmJTJMpy+S'
+              'Anh7KnTW34NNbiZAi5KKh3oODEfIN8p65Y3ojvivb5zbSwyHsWLovdVapfKnzMTBgJdG6bM3b2xWUIckeEAI6BvYBs+313zhai0N'
+              'tgDyghhsUvgpsVjbmj0W40MXnb2cgSbaof+HtgTQB2DweoobRrcWhqDSeNQFuQOj+d+6B2rw/g602oStN0ZH0senkDliwh2Kr74B'
+              'qgktW95NRw9KJUIroKElNUv7dOmzD9vdVo0e10Rtzdf7rOuYGJnZ3Vu0vfXMycMCAOjFcr/SVu7Xji3mh7pBA/WrkOtfnVoBoe15'
+              'tZVQKyMdjO9Bli0i3mRFT8mC1KJjtBFHhFqCYexG1zr7/CGL+kHLum1h2zJJ7aa20jd4r30dCliM73XCpHe6CfNkiq9mWLdRFroS'
+              'pSiMOGrSUtrWvXyy277XjJQPqshVw94gB7agjCbbtPBwfFftLf5qukC/dlqrHf5+disDF0QXO3thvtK1tdRcv9/wXjMIafm7tAq5'
+              'h+ixw17tEsJg/Os4HFlx977pFGp0TmhUO/2tMOBM5lr/1RLWbYnGckZmhqoAkJtEfcfvfXWSyIa0KiO52YnIHrQ9ozKj5wcjETWt'
+              'xmqmVntL4H5HAxlC3YqgbmdTW7rUG4j8mOFh3xkfdnarr4GdiaGMs7ujv3kfh753bt3wtvosyHXCqxKgMS7I8SkhjxhtKYZ2ImzF'
+              'dZg7B1b9pV6POpNdJR8+qhJUGfC1/nVSJPAQugfKb955sO0f1fTb3nRokLJ1ZdrvtEekNANSxHy1a49EiAOX/MYYByoB7sLsYZFN'
+              '5Xcdo5Dt1To0H6yuSTW5Bhytrl0Lm+Alpivma6FrPvMgb7kqKRY6XCQrWidaH49aYg1mGpO61xLgHCNhCbs3GJrNbRza5FZ1bbko'
+              'CslMp3/619cfX3qXwXKJNEPJdHeujTPUmEhsYayxhV5HzsL9mlRsLY6hzU47C340KmMwEYqYiteR3DhvlsdwG+36opzOH2F5e/Ih'
+              'nS2a/dS8Tcs0rnkIOve4v9dKisrf7KLRXNaN+BCOr5PdNfen6411bZtZvkJyOoPL8T7zcjWdPmk/+VRjfDrOeXgqY4mhU2J6slhA'
+              'ECVV4Tb0DJnCSgChMcKnHJT06IvJCCFGv7/yZRaHBq8iPmQU/hClasg2PTLkQ7stF7KhpqYooXz1zCwhohdYIMjIeiwZpsSSvsLJ'
+              'thg4iTvPKUbhEuFq55JgPfPnVI+bXNTc3eXibnVV7FPRaTrhrD51hU/F4cRgOiuFDmRC5ZrqyOOeOJbGQvoN8JyYul6DkD80X3eN'
+              '3KETDii2ZE6Z7sjNZGhMT09wJvixzKMgcVwoxVFbHN3g5vd1pLUtTItXV9TTaOidSoQ5/G5PXtjF3sRonS+4gBMl8vEX6ALEbQbe'
+              '0aFR847pi3MokMRcdUqUzqubjBUPInPXsz4xstajfNSNL2hCwptk4qTZVgTjIZ/n8bRzgBQE64Fz2jyOvFfDUyaENxV5rmlFc5WJ'
+              'zAQouiJynjERzOiFOm9WbCR8PCM8UmWuUmrZkEAM81VWjPgtucif3hMHTtHFMlu1k97qmcGIXPrc1y56t5Sqp12463HynjfodW3I'
+              'r8EAmpJCAXM16F5TPmFMiJT/IvG8FhB9TAcO9CsiYD0sdcISh/ecUWvvFiZIX+7URJoZQb56gkMEbyVM7M+IFZfJ/PLpp/LFX5qg'
+              'Id1F3Nw3Huo72HdXDr/29BAPCDBety9eRyME+hwMe41Mfg2P+BwkRiUNeQYeqP/wDyrfiOxKSQjnly6WXETVQC/IWsf9VyvcGn6s'
+              'V0BZpZcsgkXukW2LTSYE6ElpdQKLUe3XlqOFkRhctQB56/CopethYL9fZloyS7+Vv9d8yFJ5k/NXKLWNziFrhcTBdC+TuUuHtIrg'
+              '+U2nbk197jD54/SBVPSXqZaKrmXwNGxl9Bf76CoeeB4fVGuxlsXLOiNb8K6vV/uYUq0IgWIrPCbZXecpokcwO1djFWMwP9e5gAbf'
+              'eU9iD1WE4AE2sqCHQFDDrld3+dJsuNLtaKKlaCBOs+ywPDHHBx4FWn0J+EbFS0ms+WWerNolhmvTVtUuM4s6ce52mbvbX+6315SW'
+              'feS2bV6095pGYGdtV8OvYq8Y17Tx2MF55vyGysEPVwmWxglv6sS3AR4GbQt64JLCciIdhYTrGTdj8tsgB3VfzuwpRuka1W8LChqG'
+              'ywgDW5Hq5nyxXVvodiIT1awWxxT5qtAhoZY8Ps/EJokGunNeZVfVuVXbwbaXx6sYJDcamwafpqoM5KJOnXNz+Nuetz/PMo9CGRu3'
+              'nk//5//suiePn75t3dkvl6v9oHW5dQFevOF/gZxk3cNFEyVrYlFg4j2I0+7omebScCgXF2TiFRFFL7mkeJbnFZkzPvmT+KS5NuW3'
+              'M+ZI6PabBfIeKidtS9ZBdrhJ6/OBSB3xWNk8Z1F8YWMvsojONh1xJlI8t/tO08GKFQHy3FQAGn3sUKr04NTRc1ov+u2I3PW9tbLF'
+              'R4PxSd8ZfetToDe1H+lcfRDXhY8B8+LoA+LwwFhFoRX6TTiBrh0g4vbKS+0BtY6RrU67NZHSApzvQYzRxojBdTOayetrVrUxUIW/'
+              'm2AEwkIr6ILZaBvhQzf/FDLLJ0FDq3KVlP5lDGIEw7dwiQCTxRkBkT+7qzddmwvGxfrXlunXICmM2R3aSxlO0JHHH7byOCpiuX3+'
+              'ktZcBvzK/apGhDm+qXGpSyQ/JJa/STSzxJWvslbxpzXqMDYfgNnABFkTBtx2x/L271yXh/g9ohAenYl8XhwwEWWEQ/I0Sl+dRvld'
+              'OKSOnBBxCa1wNCaTUW8tM2jOvvbZ79h399RpAipBpY6deKgzxKCH++I8qL/LwLqVcXHkpVorqvrnU9ADHiPAEUG/aZ02JF7ZvKgV'
+              '/C7qNHXdJR9W2a3rrqW8e5uJIImIwnZ39KNu5LbaOyq5T/518f49Fbix3bPycNUrp+rYmrBLlM6W+IY1nAcJriAHJvh03C4Ggvjy'
+              'uF21tnREhJjCP2pJrVUMOvXs78OHdZzawJVmHMtvwBWFIrRfCXqANdCWlOa1T60NrG0pu1J7VFysCTF1xLJ+zGIr92FdSoXMpjAT'
+              'kGT6QVcIjRmeocoJN12xa5JT1iamyNxZChqSh/Nqh0xbo/v1XSaLDqgk5YP5Dd/HF/j8VSszMHwJfbVotnfaMaZbXEgpLh5r5rmK'
+              '2GcrDB/mNMVNUoZXmNHPJ5BBt3kG3OZyVflXlFRd4H6R4EFCV/blMTR/Z27zd6Wtf6xq+Zu1xU68kXGgapaq5oAVo2Qv6w615A0I'
+              'BvWmb+1UX7TR2FUrgd/cegOj3jwAz35sU8vLZRPDTYfLEjihrMu6rIqSEo6S9CrOEzz4N8YtA8wa3/4Gb5YQ4WG2SuR5bESmyomi'
+              'n/FUZFUe4qFsywwatSkszzKjMq4qnhCn19MpCisMhoVFoThTJZxbGW57X+5BUOd0cCf+my2n0yfV0fhpg0RU0a8wj9HQlyfW7eBA'
+              'Og9c41kg6kArEZMrdgzJU9Yy/LWQXu0R4QLctg5IFD/iV/V516ZzQC4XIcKEM5nUqZ7UEzo39z8ZzsaWG6150J84hYPeuLZTycbs'
+              'YcP8Hu2gMZu/Ifvs9jaB2Gx7lmef43S9Z/2boNXt7WDhWEMliAhP69405kU7Oy2a7zo70YqIncTIu7IhCDjUpKmQeiG2IpkQMYzC'
+              '5zAK0rc5cqpFh2aIl77DSeGHMorJMe9otzpAVF3LvXbeU7WsCLZRpcb3nIE37HnBDHX/Jw5voOqb0a1D4BbJrD78jX+I891Go/Dk'
+              'IBx53mh4MDg4GbaPVRfN65PexAU+e5UPXq0PVccdV3EY5OlWfSWJEu1nCExJ/5nHEagtCdjDpxyzgle1A+WgLe/rBukd7e2C8RwH'
+              'Ik5vOwLcAJXnou4Qr2j9w69fE8vReHja3aKGi/wpIAPwOImGB553fDQ6mYWDNmTUAzVs1CWCzkjABz8nEkJ0PgifUChP9HuR3aRY'
+              'eOLTKgJ+K04Xp4pci4VxrXHUrpBkrdOUbcdTiooT8gAS82TEdcdj9up3f+Sjbbmx2smb0mUYRBLGsjGGMr3IgxuKSqKQpzkopw5V'
+              '7EgKR5596ODWEx/8hwFPJP2dLPXUG9+Ihu2Xyjvqva3lVWaTWmHtiljk44M4Po5hkaMwiubhpL3I+jP1OutXcalHY1pp/DiRC90+'
+              'usyRMcF0UqEfBuGVOqbMds9fzqZY9lK7y6W6HA3k2jlhjdMVRRQVKS99VUq+T3FlrO/s4TFCQjvwJPM0zmHr68f2UAErJDkbvhiH'
+              'AtEpc3LMerO1J7FqyPPRwBuJL6cOn1OOorWg4uZZRdkk82yxyBjbirsCVCLt4Hf58NQxcUZ72yvp25CFJWrEZFAS2ItaZ/Fo1ccH'
+              'tOrjg7F2Xn3HYWhmbRx9/dl06LpPOIBnmDSatBEB4EhT77dLFG4Efc1CabyrC4L1G81cN1Cis6UvRshOgM4GEgrcrEXE1KamYPlT'
+              'kO84HBxHg2PPC8bDeTSftclXPVDTrrqES3h4OMAlxI/hSFIuKvBhlsqIya12MpQxHZDZW9ZUDxu0jVhMc6WqpOUsaYViWymPHf11'
+              'iPpRO5ga9J4VNI49ESbZLFGjGvL4cPoU6YZfOCiP46wwGBBPqOnjSTOldjI176fDyvoUJ4DP7siXipPaj0YHQCe7IE77wwMN1mGS'
+              'h4u4DW3UuS5zKk9pxHcCvA/r+M4hxneemk8xRHBPMQGqxrDbfWcE7R5Tf43GwEwWzVfgNZ9+1i+idvCmPVvgvicmgY3iiEMbOXKN'
+              'Iv9pPHT2XCuoRAWBnm22uHyhcbh83cmZnPyXJnL91sHak2iMfimbROu1Dim2dPcNdCIjYPX+xGL1GqtJhCvCHNXqPwYleXzUaJnN'
+              '5+zrQFnoU+C1z9dcxnrVlfUdOYVdMmJPjgmxT05qRRiDChGJ9KhrCotTkdcrIKMSE3p23vG3PjDaWbzgss/oTAQ7BIuAzLZUiqBc'
+              '7zXJO8ZIJUafWRiAhskGzRjhwEw4TZSVTTdD2HZ/OkBhNmKmTb7aQZxbrdA2AUkPA4UAaaglLczxYIzc/Xh49PdcmHZ484cSrex/'
+              'T9DT8prsyoYE1AHwnYQgqLSDDFaZWkpJ2WA3XmJNnDsR1CyX1k7K3NSFfvrisT7YvgsqvyCGTRA+GSHqTwaHrPiibzmby/GKCNSH'
+              'BKhcv6Iidc8QpnubMpo2lv1O/NaKvru/mf/9nkwP8fdWrvcinuNIdwGsEVUGuDWpTSUNIBsj51hYm6JNNse0FyUFbo7WrmUMtawJ'
+              'sqW1Vcm+tCqU6mZc2+jI+TCaBJNx2HnkvNmjduL8iXHg/J44c0kUMq/Pln8Z4QmGM7i1jOUp8g4VPybN/zqBMYKxiqWjUnWKu1i2'
+              'YLWaTp+tVqfGVWMxv+iJZ3W5J+FBuzefTIaTdDq9RDK4Lc1b5FOAl9EAzVuicPMXzih9DVPjs9Jlsaqr7MbFkTKHg+GKtFOd3xmJ'
+              'PWTtUPbjauXxD70kflXciXvaTMU2eOOIB4DavBSNlbWsP2VuZgIZEY91BQhcfnnf2X6jl2qkMFFPhOqIE7q5jis9jWbuVZaXYVUK'
+              'OzdcgNVLSRQFnglS4p4XHdGxokNAsAShNgQs+lisgAW5WpyMuC62evwqcR/hjPvO1yoxks6RZ2Cw3Sy75Xh2goGMTgY22pzaS7pj'
+              '2OmacV6Xp2zwG5hh8lc8b2vhowN0BcymOZT1IBXn0VLc03bPFnDvirBo6qBniY+l1Hj7Mdvtecpb29aDrKxJe5ZexJ1NOhHRW+0+'
+              '+Ea7iwvb5h4AkP0BVBeTTwzW1lWAyIDU6cPVFtehmgK/rG9FVUvRB1MGiXUdGvn+limLxRb7cds92/qkdBoGMnOuwD6LgU4idswB'
+              'uV4rHEWRwDjK9Oa1QdksHtA9JOGRsg7pmZHoCPOOg/BKjOIPeEzYao8yxxzOqMMKR0EK8MRCp3gqFVVAQuZelOvGqOLJLEN4p45q'
+              'FFDhs63swxXsSQPcLIOxLvHxvvJU0eYBciBxvgYLInN8FxY6LmKYGZ5G18reUETO7Px9El59pH143B8n7Ol5oLRmtFPW9axAr/bt'
+              'DTmN1IOq4grTghs1O9qMslHyCB4VKk8LrrJeDML/b//5XwApjzh6M8C8+YdSR0h0PtyNped02vKVy2I6pxuXatEidArEtjPBD/QK'
+              'U7WmdLpu2ppccUV3cvuIaYTXsc0KaTsMI1I2A4dgWLKEnuQuXWVx10ycrDWe95c1EuY1n4dE+TJ0cYHBdKebVb6x1OdSOquscNdS'
+              'Qur68mW7trYuodGGATHOA8depPUR4Z4KEKu1yJw9S2odH+d7gi4/LBIz1Y1XxCyUgiHA3tnRoFWBtprPk1t3+5+2OcjDfYDH485D'
+              'nF6WV42QpU1GpOf49p3hIQxofPjtA5IH3GM33zEKrUwEA2X8HUB5Z2hRa4BiU9pE9piN1YviIkJJo1NWr8iSAW4X0uWipbJ1kMkz'
+              'GT+NKmk2x8PHZFad57zGDbE4/ivudGCJWo7FBg0+JT8rfgUCQ2myym4QcUE+UXkTvMT1Tjzn5+A2WVZLWEl5lOQKlwUIJ9V13/XD'
+              'bJzyeEqTpjp+xonGQjn/BCp5xsef9W1H0bNifjTmXjjgx3kmz//BF2CabuGgcTZP8qJUB8luqkKtlynvY3T76Wc+zDR9uFgrY6RV'
+              'Y9kzsSRU9epaB/zgo257yEht65JejW1b6rTXLgtAdtqXTVb2DRhBiC5GPXwWtN3FBhQP3rEy4aZJ9G0M995ijA0HhjXWhaUYfAkm'
+              'uysP0I4yCuUSehYhKoYm9OrJMRMSqcCNWuEoz83xroIUVHzj/FAs5rAEeZOk7nDk6UzKI+MbfTgdttk36FakbQiZJwZjkdrCGaDv'
+              'XOHr0SsAmPM5Wf0Ik39FzimkS/SPrTyuxrISrlOAorV+ouja3KipO0dOKzs+ODI7ZlYTYOjQiiH4wEu6x/8qy2+CPPpNU9Cckx0J'
+              '361dOBUIuuq4QUTBw/zXGGioKzN7py0mKblX8J/true6yhOuVZzox73VNbfMIsMtx7+l9+348HgwCjxvdDgJZsdxe0u1fsJwxYlr'
+              '6IY7QKf7Abnct7jkAsZxYaz1dPosD0+3nDo4B+CVYDTQrviBDEiPDcoWaIGT5wsvciBIT4T5XCdhjNFB9IsOASlOrVNmIYU5isbM'
+              'jcsyJGQUHEwiUDrms2AUDQZWAJgPGnAwb9Ee84S2mCfmrufGzrkWK+AT+5AZwDcf34c7rrpPmOMaKIji5ipDDEMrlBkVFgwKFxX5'
+              'WIS5iplCd+waQ/e8136laCg8zPEtEHI0cjnEjQi+Gd4mxZguHeoyeDbN3FbbkN5qubHTJUUtbQFGddiyeYJgdkMHCHoChB2FE3Z2'
+              'aCazKhIH6QjnK2ldaKhF5Ep4i3G3i3YNs6b5dJ0UFUXT5Lj6uOZyHfrGWHu2nS7BxUQfBeAZF7XQytOpoTbfbWcG7Sgp86KgimAe'
+              'HQUnM88LD4P5ydBOFfZYqcYNjowbHHJkHHwOT34TVdxrQQhaIR2h3p11e5863a2nrW78PLvB/bTz99lN7V7RFDaxDSGr6tZ35Nsb'
+              'NVJ4LM26AhQWg1vXhkIqiudI664VyoVqNOo1l7RNVB/KSvgnz464qFXRgvmpL86Pd3fSOI4QMjtiGvU3mrdZdSG9kzvO7SL4omcO'
+              '/ljJvdO6W9JvRPkdcRHEglhxXGcjcUVztGS3d7aVfIc3tuX6q6Ydq+U010T183MWxbi3hoGlfHAyCK2cAsIIP4KigLFG280oQyot'
+              'ZO50NS9ttNEVxScng/mxdaOr1aG2zzUcj9VGV20XAI9OI3YzqnQGKngdKFUYD4krY9D40cYiYwePOSFJLZMG1m5miVyMeldL7mZp'
+              'j7f3pjCpinCCN6nmvBeHK6FVPxSJRPqmFGcYGbfbdpfUHjlq1sgPEbcAxxZ3MtlLjAT6CXItdh5u1tW8cONP1C00Xt5HgZni2YxY'
+              'MolvvcQrT1UdJVeWbpTuPC6wR4X0nupzo7NbhCPYVmBJtsnkEZh07E6V4jZUs9rW++DmdYqtmuevhnkcc8CKSJ+sx7S+WFvd97us'
+              'GE2n/+Pl+1/6XU1IGzjiePeRtaBn8wKDsZW6KSIo7ZmbWusHDasHDaoGFljMhjk5VTh0pmMbrMN26fbGdloYFPZtM9e6m4/s9ZRV'
+              'ZIXXOISo3UCYTd1N2LDOqmK7q+JUfy1QGuF9vwUsmqHZ3fTg6LeCpLZZ17ViY3Yd3GC03wkzM0IJpalSXLZFFYL1Heh2ruyAQmy1'
+              'brgAgaWfi669BLVlRV4pV8WUJZR/LH7IeBzxU/nSNjloxDRhpfIirjEPlJmFmJa6KAPoH2xuRbtyhKocoEgFmgttijOAyoIyW/2E'
+              '8k5AC6BaKbPsVqTmcRVXuK1l19eSSEktPTQiADmXpDHvBt0IMdMuD/gNqbB0lCuOucF37LvuHffldnrHbaPMyYWt9N9vzNq3la3/'
+              'nuT8zjxtPkWakrVtKdsdxX+sS9RXq9guPV2jkVCL4ogsbxnoBio5UOwlYhYWRVLVeAj7N0WiDRHDlhP6XfmgNLhNskLX5Gs2rabO'
+              '5FFL1p/W+3dVl2jXZeRyjrjN4E76zqSvN3HPhxNQTfD/0Qj/OTy8MApY43Ylpbj4PAS38wQX1e+a+py2WW5AUF3EtFGRoo1rZKja'
+              '5p0HmqwhUkmgDxMnZwzrSBQHkWCTfGAnITiluqVop4EpiJGL2r0XFdsgskxhHBauKuLMG29mORY6CaCz7yf1EL40qEceHlosQDS4'
+              '3UNYAqUnOIjeNzEqAxZC7D1QUaZZAoBrQLQy6tu57+KBBtutt8i7rLxGBYXmgQLyxaZY/v1fL3OLN3s/8dTahHpQ/K6yIiE7+Uw9'
+              'dj688IYqUFrvl8IHz5yvqDYUeI6SZu6hVUSRvz+2ypXDO6bqRRYClUaV9jj85Lhyrbl4q3ZlmUXJPInzQvbxs7owffvL25d9k0Q1'
+              'YFANQtvof86uMfxEDBZ4G8ssUjIvWsDgUn2NbvkJ1icvmnghHkMYj8x7JIvFbS/hEGpx5vZXsTRf5RrBs5Yk8Y0TxFtiPMDgdK7J'
+              'oE719qMsLqjCWZQUYZBHfpXm8YKEfbvcEupn+gauqaXp5VPx30ful20OuJw6oJ58BnaUbt8bPLn1xHjU61LNKLRmqvtb6tTYdZV1'
+              'OYrRMriGL/I6W1RLHOtwdDAG+UtmBQ59gVF3KJG1qcN17Ze+B/VA5R69TgBOyOPX9umtaxvSePr2+Rs5kW9wvGu70rcPnDXl9e5r'
+              'SsgW3wP7zqrG2pCg540GdL/GEynq9VgckvWdjfySgzgMxsPJw35JrV/NPVlH4T/Plit8F8aLBGFZBQs9Ih9GUC3Y1Yr+yCrFuitU'
+              'tR1IKpCBoKBOY94t9UdHXS4We4tklmPiELYWLeB6kcktrsLBuMsCesbwGkdRM+6S8CtEh++VyxRHwcEzzlW8WAFjdUi3dyhLQKUF'
+              '5+g9/SAxwBEDEUduNDyhX7i/PtvmyJp/OEeLBTOpPY/2SPRtsrzYvugog/D/Aa35SMzu3QAA'
+          )
+          patch = gzip.decompress(base64.b64decode(encoded))
+          expected = '1d9ae08cd1de636b4b23be908d23b5125e32a0f6cceac0f39fd12e52369e8908'
+          if hashlib.sha256(patch).hexdigest() != expected:
+              raise SystemExit('Embedded patch checksum mismatch. Copy the whole workflow again.')
+          filename = Path(os.environ['RUNNER_TEMP']) / 'spotifast-artwork.patch'
+          filename.write_bytes(patch)
+          subprocess.run(['git', 'apply', '--check', '--index', str(filename)], check=True)
+          subprocess.run(['git', 'apply', '--index', str(filename)], check=True)
+          subprocess.run(['git', 'diff', '--cached', '--check'], check=True)
+          print('Artwork patch applied:', expected)
+
+      - name: Set up the Windows C++ compiler
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: ${{ inputs.architecture == 'ARM64' && 'arm64' || 'x64' }}
+
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install 1.98.0 --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { throw "Rust toolchain installation failed" }
+          rustup target add --toolchain 1.98.0 $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw "Rust target installation failed" }
+          cargo fmt --all --check
+          if ($LASTEXITCODE -ne 0) { throw "Source formatting check failed" }
+
+      - name: Prepare MilkDrop dependencies (not a stripped-down build)
+        run: |
+          if (-not $env:VCPKG_INSTALLATION_ROOT) {
+            if ($env:VCPKG_ROOT) { $env:VCPKG_INSTALLATION_ROOT = $env:VCPKG_ROOT }
+            elseif (Test-Path 'C:\vcpkg\vcpkg.exe') { $env:VCPKG_INSTALLATION_ROOT = 'C:\vcpkg' }
+            else { throw "This runner is missing vcpkg. Share this failed step's log." }
+          }
+          "VCPKG_INSTALLATION_ROOT=$env:VCPKG_INSTALLATION_ROOT" >> $env:GITHUB_ENV
+          & "$env:VCPKG_INSTALLATION_ROOT\vcpkg.exe" install "glew:$env:VCPKG_TRIPLET"
+          if ($LASTEXITCODE -ne 0) { throw "GLEW installation failed" }
+          Get-Command cmake -ErrorAction Stop | Out-Null
+          Get-Command ninja -ErrorAction Stop | Out-Null
+          if (-not $env:LIBCLANG_PATH) {
+            $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+            if (Test-Path "$llvm\libclang.dll") {
+              "LIBCLANG_PATH=$llvm" >> $env:GITHUB_ENV
+            }
+          }
+
+      - name: Test artwork and native button handling on Windows
+        run: |
+          cargo test --locked --target $env:TARGET --test artwork --test artwork_decode
+          if ($LASTEXITCODE -ne 0) { throw "Artwork tests failed; no installer will be published" }
+
+      - name: Build the full release application, including MilkDrop
+        run: |
+          cargo build --release --locked --target $env:TARGET
+          if ($LASTEXITCODE -ne 0) { throw "Release build failed" }
+
+      - name: Check the executable's architecture and standalone runtime
+        run: |
+          $binary = "target\$env:TARGET\release\spotifast.exe"
+          $imports = & dumpbin /dependents $binary | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Could not inspect the executable" }
+          if ($imports -match 'MSVCP[0-9_]*\.dll|VCRUNTIME[0-9_]*\.dll|glew32\.dll') {
+            throw "The build depends on a runtime DLL that is not bundled: $imports"
+          }
+          $headers = & dumpbin /headers $binary | Out-String
+          if ($LASTEXITCODE -ne 0) { throw "Could not read executable headers" }
+          $machine = if ($env:INNO_ARCH -eq 'aarch64') { 'AA64 machine \(ARM64\)' } else { '8664 machine \(x64\)' }
+          if ($headers -notmatch $machine) { throw "The executable has the wrong architecture" }
+          $version = (& $binary --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^spotifast 0\.13\.0') {
+            throw "The executable did not start correctly: $version"
+          }
+          Write-Host $version
+
+      - name: Clearly label the custom installer
+        shell: python
+        run: |
+          import json, os, tomllib
+          from pathlib import Path
+          metadata = tomllib.loads(Path('Cargo.toml').read_text(encoding='utf-8'))
+          if 'milkdrop' not in metadata['features']['default']:
+              raise SystemExit('The default build no longer includes MilkDrop. Stop rather than omit it.')
+          repo = 'https://github.com/' + os.environ['CUSTOM_BUILD_REPOSITORY']
+          path = Path('packaging/windows/spotifast.iss')
+          script = path.read_text(encoding='utf-8-sig')
+          replacements = {
+              'AppVerName={#AppName} {#Version}': 'AppVerName={#AppName} {#Version} (Custom Artwork)',
+              'AppPublisher=Carmine Paolino': 'AppPublisher=Unofficial custom artwork build',
+              'AppPublisherURL=https://spotifast.rocks': 'AppPublisherURL=' + repo,
+              'AppSupportURL=https://github.com/crmne/spotifast/issues': 'AppSupportURL=' + repo,
+              'AppUpdatesURL=https://spotifast.rocks/download/': 'AppUpdatesURL=' + repo + '/actions',
+              'OutputBaseFilename=spotifast-v{#Version}-{#Arch}-pc-windows-msvc-setup': 'OutputBaseFilename=Spotifast-Custom-Setup-{#Arch}',
+              'LicenseFile=..\\..\\LICENSE': 'InfoBeforeFile=custom-build-notice.txt\nLicenseFile=..\\..\\LICENSE',
+          }
+          for old, new in replacements.items():
+              if script.count(old) != 1:
+                  raise SystemExit('Unexpected installer template: ' + old)
+              script = script.replace(old, new)
+          script = script.replace('[Files]', '[Files]\nSource: "custom-build-notice.txt"; DestDir: "{app}"; Flags: ignoreversion', 1)
+          path.write_text(script, encoding='utf-8-sig')
+          notice = '''UNOFFICIAL SPOTIFAST CUSTOM ARTWORK BUILD
+
+          Includes the button texture/sticker editor, button shape options,
+          and image/GIF player-bar backgrounds. Default features include MilkDrop.
+          This is not an official release and is not code-signed.
+
+          Quit Spotifast, including its tray icon, before installing.
+          This uses the original installer identity and application profile.
+          It can replace the existing per-user Spotifast installation in the
+          selected folder. Back up your settings first. This build is based on
+          0.13.0; do not blindly install it over a newer upstream version.
+
+          The app's updater still points to official Spotifast releases.
+          Installing an official update will remove these custom controls.
+          To keep the custom changes, use an updated custom build instead.
+
+          No Spotify credentials are needed for the build. Live playback, GIF
+          performance, and GPU behavior still need testing on your own PC.
+          Windows may warn about an unknown publisher. Do not disable antivirus.
+          Only install an artifact from a build/repository you trust.
+
+          Original Spotifast copyright and MIT license remain unchanged.
+          '''
+          notice = '\n'.join(line.strip() for line in notice.splitlines()) + '\n'
+          Path('packaging/windows/custom-build-notice.txt').write_text(notice, encoding='utf-8-sig')
+          out = Path('dist'); out.mkdir(exist_ok=True)
+          (out / 'READ-ME-FIRST.txt').write_text(notice + '\nAfter installing: Settings -> search artwork -> Import image.\n', encoding='utf-8')
+          info = {
+              'upstream_commit': '36964f19e2fb1154d5e87973d76928c7ddbeaf06',
+              'artwork_patch_sha256': '1d9ae08cd1de636b4b23be908d23b5125e32a0f6cceac0f39fd12e52369e8908',
+              'version': metadata['package']['version'],
+              'default_features': metadata['features']['default'],
+              'target': os.environ['TARGET'],
+              'build_repository': os.environ['CUSTOM_BUILD_REPOSITORY'],
+              'run_id': os.environ['GITHUB_RUN_ID'],
+              'signed': False,
+          }
+          (out / 'BUILD-INFO.json').write_text(json.dumps(info, indent=2) + '\n', encoding='utf-8')
+
+      - name: Create the actual Setup.exe with Inno Setup
+        run: |
+          function Find-InnoCompiler {
+            $command = Get-Command iscc -ErrorAction SilentlyContinue
+            if ($command) { return $command.Source }
+            Get-ChildItem -Path "${env:ProgramFiles(x86)}\Inno Setup *\ISCC.exe", "$env:ProgramFiles\Inno Setup *\ISCC.exe" -ErrorAction SilentlyContinue |
+              Sort-Object LastWriteTime -Descending | Select-Object -First 1 -ExpandProperty FullName
+          }
+          $iscc = Find-InnoCompiler
+          if (-not $iscc) {
+            choco install innosetup --yes --no-progress --limit-output
+            if ($LASTEXITCODE -notin @(0, 3010)) { throw "Inno Setup installation failed" }
+            $iscc = Find-InnoCompiler
+          }
+          if (-not $iscc) { throw "Inno Setup's compiler could not be found" }
+          & $iscc '/DVersion=0.13.0-artwork1' "/DArch=$env:INNO_ARCH" `
+            "/DBinary=$PWD\target\$env:TARGET\release\spotifast.exe" `
+            "/DOutputDir=$PWD\dist" packaging\windows\spotifast.iss
+          if ($LASTEXITCODE -ne 0) { throw "Installer compilation failed" }
+
+      - name: Install and uninstall on the disposable build machine
+        run: |
+          $setup = (Resolve-Path "dist\Spotifast-Custom-Setup-$env:INNO_ARCH.exe").Path
+          $installed = Join-Path $env:RUNNER_TEMP 'spotifast-installer-smoke'
+          $args = @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/SP-', "/DIR=`"$installed`"")
+          $result = Start-Process -FilePath $setup -ArgumentList $args -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Installer smoke test failed: $($result.ExitCode)" }
+          $version = (& "$installed\spotifast.exe" --version | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $version -notmatch '^spotifast 0\.13\.0') {
+            throw "The installed executable did not start: $version"
+          }
+          $result = Start-Process -FilePath "$installed\unins000.exe" `
+            -ArgumentList @('/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART') -Wait -PassThru
+          if ($result.ExitCode -ne 0) { throw "Uninstaller smoke test failed: $($result.ExitCode)" }
+          Get-FileHash -Algorithm SHA256 $setup | ForEach-Object {
+            "$($_.Hash.ToLower())  $([IO.Path]::GetFileName($_.Path))"
+          } | Set-Content dist\SHA256SUMS.txt
+
+      - name: Download your Windows installer here
+        id: installer_artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: Spotifast-Custom-Windows-${{ inputs.architecture }}
+          path: |
+            source/dist/Spotifast-Custom-Setup-*.exe
+            source/dist/READ-ME-FIRST.txt
+            source/dist/BUILD-INFO.json
+            source/dist/SHA256SUMS.txt
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+
+      - name: Show the download instructions
+        run: |
+          @'
+          ## Your custom installer is ready
+          Download the **Spotifast-Custom-Windows** artifact at the bottom of this run.
+          GitHub wraps artifacts in a ZIP. Extract it and run **Spotifast-Custom-Setup-*.exe** inside.
+          Quit the old app first. This is an unsigned custom installer, not an official release.
+          Open **Settings**, search **artwork**, and import your images.
+          MilkDrop is included. Real playback/GPU performance is not verified by this build job.
+          '@ >> $env:GITHUB_STEP_SUMMARY
